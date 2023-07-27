@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Working app with no logging
+Resources:
+  AppALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: dulearning-example-observability-alb-sg
+      GroupDescription: Security group for app load balancer
+      VpcId: vpc-03507e0c455a47af5
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: -1
+          ToPort: -1
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 8080
+          ToPort : 8080
+          IpProtocol: tcp
+      Tags:
+        - Key: App
+          Value: observability-example
+        - Key: Owner
+          Value: dulearning
+
+  AppECSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: dulearning-example-observability-ecs-sg
+      GroupDescription: Security group for ecs cluster
+      VpcId: vpc-03507e0c455a47af5
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: -1
+          ToPort: -1
+          IpProtocol: -1
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref AppALBSG
+          FromPort: 8080
+          ToPort: 8080
+          IpProtocol: tcp
+      Tags:
+        - Key: App
+          Value: observability-example
+        - Key: Owner
+          Value: dulearning
+
+  AppALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: dulearning-example-observ-alb
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt AppALBSG.GroupId
+      Subnets:
+        - subnet-05eccb2befb604524
+        - subnet-06e5fec32f31618a6
+      Type: application
+      Tags:
+        - Key: App
+          Value: observability-example
+        - Key: Owner
+          Value: dulearning
+
+  HTTPTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: vpc-03507e0c455a47af5
+      Name: dulearning-example-observ-ecs-tg
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthCheckPort: 8080
+      HealthyThresholdCount: 2
+      Port: 8080
+      TargetType: ip
+      Protocol: HTTP
+      Tags:
+        - Key: App
+          Value: observability-example
+        - Key: Owner
+          Value: dulearning
+
+  HTTPAlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppALB
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref HTTPTargetGroup
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: dulearning-example-observability
+      Tags:
+        - Key: App
+          Value: observability-example
+        - Key: Owner
+          Value: dulearning
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dulearning-example-observability-ecs-role
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: dulearning-example-observability-lg
+      RetentionInDays: 7
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+        - Image: public.ecr.aws/m6d3c9l8/dulearning-example-observability:final
+          Name: dulearning-example-observability-api-container
+          PortMappings:
+            - ContainerPort: 8080
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+      Cpu: 256
+      Memory: 1024
+      ExecutionRoleArn: !Ref ECSTaskRole
+      TaskRoleArn: !Ref ECSTaskRole
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      HealthCheckGracePeriodSeconds: 3
+      LaunchType: FARGATE
+      LoadBalancers:
+        - ContainerName: dulearning-example-observability-api-container
+          ContainerPort: 8080
+          TargetGroupArn: !Ref HTTPTargetGroup
+      ServiceName: dulearning-example-observability-api
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref AppECSSG
+          Subnets:
+            - subnet-05eccb2befb604524
+            - subnet-06e5fec32f31618a6
+
+  MessageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: test-messages
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
